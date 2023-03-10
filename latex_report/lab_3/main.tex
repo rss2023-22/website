@@ -9,7 +9,8 @@
 \usepackage{natbib} % Required to change bibliography style to APA
 \usepackage{float}
 \usepackage{hyperref}
-
+\usepackage[normalem]{ulem}
+\useunder{\uline}{\ul}{}
 
 \usepackage{amsmath} % Required for some math elements
 
@@ -216,7 +217,7 @@ In summary; through iteration, we refined the constants used in our model and en
 
 Our racecar was tested numerous times to guarantee robustness. Although many tests were performed, we recorded and processed data for 5 unique tests at 5 different locations in the basement of MIT Stata Center. In this section, we present a performance evaluation based on field experiments.\\
 
-Four parts of our system are evaluated and discussed: wall following, corners, noise, and safety controller. For each test, we recorded the car's distance from the wall. In our figures, we show the desired distance from the wall as well as a $\pm 20\%$ error margin. \\
+Four parts of our system are evaluated and discussed: wall following, corners, noise, and safety controller. For each test, we recorded the car's distance from the wall. In our figures, we show the desired distance from the wall as well as a $\pm 20\%$ error margin. All code to generate figures and other metrics is viewable in Appendix D: Rosbag Data Processing Code.\\
 
 \subsection{Manual Driving and RVIZ}
 Before implementing wall following, we first ensured that we could manually control our car through a controller, and visualize laser scan data in RVIZ, s shown in Figure 5. Visualizing laser scan data proved valuable while transitioning from software to hardware. 
@@ -292,6 +293,32 @@ Our safety controller was activated in our Left Wall Following: Inner and Outer 
 \end{center}
 \label{workflow}
 \end{figure}
+
+\subsection{Score Computation}
+As a reference, we used the method from Lab 2 as shown in the below equations to compute loss and score (with $\alpha=1$) for our 5 tests. These 
+\begin{equation}
+    loss = \frac{1}{N}\sum_{i=0}^N|distance[i]-desired\_distance|
+\end{equation}
+\begin{equation}
+    score=\frac{1}{1+(\alpha \cdot loss)^2}
+\end{equation}
+Our results are summarized in Table 1. These calculations were performed by estimating the distance from wall from our rosbags captured while testing. The distance was estimated in the same way that the car estimates distance during wall following. 
+
+\begin{center}
+\begin{table}[H]
+{\footnotesize
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\textbf{Test:}  & 1 (straight wall) & 2 (complex corners 1) & 3 (complex corners 2) & 4 (complex corners 1 fast) & 5 (noisy wall) \\ \hline
+\textbf{Loss:}  & 0.021             & 0.086                 & 0.182                 & 0.285                      & 0.110          \\ \hline
+\textbf{Score:} & 0.999             & 0.993                 & 0.968                 & 0.925                      & 0.988          \\ \hline
+\end{tabular}
+}
+\caption{Loss and Score Calculations for Tests}
+\end{table}
+\end{center}
+We found these scores, with respect to our performances in lab 2, to be very satisfactory! 
+
 
 \subsection{Link to Videos}
 
@@ -820,7 +847,7 @@ if __name__ == "__main__":
 import numpy as np
 import matplotlib.pyplot as plt
 def loadDataRanges(file): #z = loadDataRanges('test1scan.txt')
-    f = open(file, "r")
+    f = open("C:\\Users\\brich\\Desktop\\"+file, "r")
     data = [] # [[scan1ranges],[scan2ranges],...]
     count = 0
     for x in f:
@@ -851,8 +878,7 @@ def sliceData(arr):
     arr = arr[start_ind:end_ind+1]
     n = len(arr)
     portion = n//10
-    # (right,frontright,frontleft,left)
-    return (arr[0:3*portion],arr[int(4.5*portion):5*portion],arr[5*portion:int(5.5*portion)], arr[7*portion:]) 
+    return (arr[0:3*portion],arr[int(4.5*portion):5*portion],arr[5*portion:int(5.5*portion)], arr[7*portion:]) # (right,frontright,frontleft,left)
 
 
 def PolarToEuc(polarCoord):
@@ -920,6 +946,10 @@ def findWall(SIDE, sliced, corner_threshold, gamma,DESIRED_DISTANCE):
     # DETECT CORNER
     _, avg_dist, _ = getMinAvgAllDist(xValsForward,yValsForward)
 
+    # if avg_dist <= DESIRED_DISTANCE*corner_threshold:
+    #     combined_x = np.concatenate((xValsForward, xValsWall, xValsForwardSec), axis=0) # add in forward data if corner
+    #     combined_y = np.concatenate((yValsForward, yValsWall, yValsForwardSec), axis=0) # add in forward data if corner
+    # else:
     combined_x = xValsWall; combined_y = yValsWall # don't add in forward data if not corner
 
     combined_x, combined_y = removeOutliers(combined_x, combined_y, gamma)
@@ -953,7 +983,7 @@ def mainFunc(fileName,wall,DESIRED_DISTANCE,angle_min,angle_increment):
         distance_from_wall.append(closest)
     if fileName == "test1scan.txt":
         return distance_from_wall
-    return reject_outliers(np.array(distance_from_wall))
+    return reject_outliers(np.array(distance_from_wall)) # remove noisy points
 
 def secoFunc(fileName,wall,DESIRED_DISTANCE,angle_min,angle_increment):
     allData = loadDataRanges(fileName)
@@ -977,6 +1007,53 @@ test4 = mainFunc("test4scan.txt",-1,0.75,-2.35619449615,0.00436332309619)
 test4err = computeError(test4,0.75)
 test5 = mainFunc("test5scan.txt",-1,0.5,-2.35619449615,0.00436332309619)
 test5err = computeError(test5,0.5)
+
+# calculate loss for everything
+loss1 = 0.0
+for dist in test1:
+    loss1 += abs(dist-0.5)
+loss1 /= len(test1)
+print('Loss Test 1 = '+str(loss1))
+
+loss2 = 0.0
+for dist in test2:
+    loss2 += abs(dist-0.5)
+loss2 /= len(test2)
+print('Loss Test 2 = '+str(loss2))
+
+loss3 = 0.0
+for dist in test3:
+    loss3 += abs(dist-0.5)
+loss3 /= len(test3)
+print('Loss Test 3 = '+str(loss3))
+
+loss4 = 0.0
+for dist in test4:
+    loss4 += abs(dist-0.5)
+loss4 /= len(test4)
+print('Loss Test 4 = '+str(loss4))
+
+loss5 = 0.0
+for dist in test5:
+    loss5 += abs(dist-0.5)
+loss5 /= len(test5)
+print('Loss Test 5 = '+str(loss5))
+
+# compute scores
+score1 = 1/(1+(1*loss1)**2)
+print('score1='+str(score1))
+score2 = 1/(1+(1*loss2)**2)
+print('score2='+str(score2))
+score3 = 1/(1+(1*loss3)**2)
+print('score3='+str(score3))
+score4 = 1/(1+(1*loss4)**2)
+print('score4='+str(score4))
+score5 = 1/(1+(1*loss5)**2)
+print('score5='+str(score5))
+
+
+
+
 
 
 t_init = 0
@@ -1020,6 +1097,16 @@ plt.ylabel('Distance From Wall (m)')
 plt.ylim(0,2)
 plt.show()
 
+plt.figure(2)
+plt.title('Test 1 ERROR: Flat wall, angled start, right wall, 0.5m dist, 0.5m/s speed')
+plt.plot(t1,test1err, label = 'Data')
+plt.axhline(y = 0.5, color = 'g', linestyle = '-', label = 'goal distance')
+plt.legend()
+plt.xlabel('Time (s)')
+plt.ylabel('Distance From Wall (m)')
+plt.ylim(-1,1)
+plt.show()
+
 plt.figure(3)
 plt.title('Test 2: Complex multi-corner, right wall. 0.5m dist, 0.5m/s speed')
 plt.plot(t2,test2, label = 'Data')
@@ -1030,6 +1117,16 @@ plt.legend()
 plt.xlabel('Time (s)')
 plt.ylabel('Distance From Wall (m)')
 plt.ylim(0,1.5)
+plt.show()
+
+plt.figure(4)
+plt.title('Test 2 ERROR: Complex multi-corner, 0.5m dist, 0.5m/s speed')
+plt.plot(t2,test2, label = 'Data')
+plt.axhline(y = 0.5, color = 'g', linestyle = '-', label = 'goal distance')
+plt.legend()
+plt.xlabel('Time (s)')
+plt.ylabel('Distance From Wall (m)')
+plt.ylim(-1,1)
 plt.show()
 
 plt.figure(5)
@@ -1044,6 +1141,16 @@ plt.ylabel('Distance From Wall (m)')
 plt.ylim(0,1.5)
 plt.show()
 
+plt.figure(6)
+plt.title('Test 3 ERROR: Complex corner 2, 0.5m dist, 0.5m/s speed')
+plt.plot(t3,test3err, label = 'Data')
+plt.axhline(y = 0.5, color = 'g', linestyle = '-', label = 'goal distance')
+plt.legend()
+plt.xlabel('Time (s)')
+plt.ylabel('Distance From Wall (m)')
+plt.ylim(-1,1)
+plt.show()
+
 plt.figure(7)
 plt.title('Test 4: Complex corner, right wall. 0.75m dist, 1.5m/s speed')
 plt.plot(t4,test4, label = 'Data')
@@ -1054,6 +1161,16 @@ plt.legend()
 plt.xlabel('Time (s)')
 plt.ylabel('Distance From Wall (m)')
 plt.ylim(0,1.5)
+plt.show()
+
+plt.figure(8)
+plt.title('Test 4 ERROR: Cmplex corner, people in the way, 0.75 dist, 1.5m/s speed')
+plt.plot(t4,test4err, label = 'Data')
+plt.axhline(y = 0.75, color = 'g', linestyle = '-', label = 'goal distance')
+plt.legend()
+plt.xlabel('Time (s)')
+plt.ylabel('Distance From Wall (m)')
+plt.ylim(-1,1)
 plt.show()
 
 plt.figure(9)
@@ -1068,7 +1185,25 @@ plt.ylabel('Distance From Wall (m)')
 plt.ylim(0,1.5)
 plt.show()
 
+plt.figure(10)
+plt.title('Test 5 ERROR: Noisy wall! 0.5 dist, 0.75m/s speed')
+plt.plot(t5,test5err, label = 'Data')
+plt.axhline(y = 0.5, color = 'g', linestyle = '-', label = 'goal distance')
+plt.legend()
+plt.xlabel('Time (s)')
+plt.ylabel('Distance From Wall (m)')
+plt.ylim(-1,1)
+plt.show()
+
 print('done!')
+
+
+
+
+
+        
+
+
 \end{verbatim}
 }
 
