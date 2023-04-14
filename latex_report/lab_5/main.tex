@@ -137,7 +137,7 @@ We then implement the above methods in code. \\
 We have implemented a motion model and sensor model. Now, we can implement Monte Carlo Localization by incorporating both of these models into one formal script - this is the particle filter. The particle filter is composed of three main steps. First, we must obtain the initial pose and create a set of initial particles based on this initial pose. Then, we must publish an odometry message when we obtain odometry data and publish an odometry message when we obtain lidar scan data. Below is a diagram of this workflow.
 \textbf{\begin{figure}[H]
 \begin{center}
-\includegraphics[width=0.8\textwidth]{pf.jpg}
+\includegraphics[width=0.75\textwidth]{pf.jpg}
 \caption{Diagram of Particle Filter Implementation}
 \end{center}
 \end{figure}}
@@ -168,10 +168,10 @@ The Gradescope Autograder provided by staff provides a useful performance metric
 
 \textbf{\begin{figure}[H]
 \begin{center}
-\includegraphics[width=0.45\textwidth]{No_Noise_2.png} % 
-\includegraphics[width=0.45 \textwidth]{Some_Noise_2.png} % 
-\includegraphics[width=0.45\textwidth]{More_Noise_2.png} % 
-\caption{Gradescope Simulation Plots. From left to right, top down: No Odometry Noise, Some Odometry Noise, More Odometry Noise.}
+\includegraphics[width=0.35\textwidth]{No_Noise_2.png} % 
+\includegraphics[width=0.35 \textwidth]{Some_Noise_2.png} % 
+\includegraphics[width=0.35\textwidth]{More_Noise_2.png} % 
+\caption{Simulation Plots. From left to right, top down: No Odometry Noise, Some Noise, More Noise.}
 \end{center}
 \label{workflow}
 \end{figure}}
@@ -203,7 +203,7 @@ An example frame from our video is shown in Figure 5.
 \label{workflow}
 \end{figure}}
 
-The video shows us that in general our MCL implmentation performs very well! We were able to drive the car around via only viewing its estimated position. In general; the car's slime-trail shows that the car tracks well with respect to it's true position. It is worth noting that the laser scans have a harder time matching to a pose when the robot car is in the uppermost hallway. This is to be expected, as the map given for the Stata basement was created before a series of large crates were placed in the uppermost hallway, thus the map no longr reflects accurate real-world conditions in the uppermost hallway. 
+The video shows us that in general our MCL implmentation performs very well! We were able to drive the car around via only viewing its estimated position. In general; the car's slime-trail shows that the car tracks well with respect to it's true position. We can see that when the car performs a full circle of a turn the estimated position forms a 'loop-closure' as expected. It is worth noting that the laser scans have a harder time matching to a pose when the robot car is in the uppermost hallway. This is to be expected, as the map given for the Stata basement was created before a series of large crates were placed in the uppermost hallway, thus the map no longr reflects accurate real-world conditions in the uppermost hallway. 
 
 
 \subsection{Convergence Time}
@@ -283,9 +283,574 @@ This lab was an interesting look into transitioning from software to hardware si
 This lab was, in terms of technical content, definitely the most interesting of the labs so far; working out the kinks of the motion model and particle filter were gratifying, if quite time-consuming. It's also the first lab for which I was building off of other people's code in a significant way, rather than being the one to provide a first draft of a module, since Dinuri and Sophia got started on the particle filter before I took a serious look at it. This has made me reconsider to some extent how I write code in collaborative environments, specifically with leaving more informative comments and documentation.
 
 \subsection{Jose Soto}
-In my opinion this was one of the most technically challenging and interesting labs that we've worked on so far. Spring break falling in the middle of the lab could have posed some communication issues for our team, but I think we handled it well and were able to deliver well despite the circumstances of some members be able to work on the lab while others weren't able to. 
+In my opinion this was one of the most technically challenging and interesting labs that we've worked on so far. Spring break falling in the middle of the lab could have posed some communication issues for our team, but I think we handled it well and were able to deliver well despite the circumstances of some members being able to work on the lab while others weren't able to. 
 \newpage 
 \section{Appendix}
+
+\subsection{Particle Filter Code}
+{\footnotesize
+\begin{verbatim}
+#!/usr/bin/env python2
+import numpy as np
+import rospy
+from sensor_model import SensorModel
+from motion_model import MotionModel
+
+from std_msgs.msg import Float32
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovarianceStamped,TransformStamped,Pose,PoseArray, Point
+import tf.transformations as trans
+import tf
+
+
+from threading import Lock
+
+import tf2_ros
+
+class ParticleFilter:
+    def __init__(self):
+
+        self.measure_convergence_rate = False
+        self.measuring = False
+        self.measure_time = None
+        self.measure_error = False # only works in SIMULATION
+        if self.measure_error:
+            self.gt = Point()
+            self.pos = Point()
+            self.has_pos = False
+            #self.tf_sub = rospy.Subscriber("/tf",TransformStamped, self.tf_callback, queue_size=10)
+            self.error_pub_x = rospy.Publisher("/error_x", Float32, queue_size=10)
+            self.error_pub_y = rospy.Publisher("/error_y", Float32, queue_size=10)
+            self.error_pub_dist = rospy.Publisher("/error_dist", Float32, queue_size=10)
+            self.gt = (None, None, None) # x,y,z
+            self.tf_listener = tf.TransformListener()
+
+
+        self.num_particles = 200
+        self.motion_model = MotionModel()
+        self.sensor_model = SensorModel()
+        self.last_odom = None
+        self.last_odom_time = rospy.get_time()
+
+        # Establish thread locking for the two callbacks updating the particle list
+        self.particle_lock = Lock()
+    
+        # Get parameters
+        self.particle_filter_frame = \
+                rospy.get_param("~particle_filter_frame")
+
+
+        scan_topic = rospy.get_param("~scan_topic", "/scan")
+        odom_topic = rospy.get_param("~odom_topic", "/odom")
+
+        self.probabilities = None
+
+        self.initial_pose = np.array([0,0,0])
+        self.particles = np.zeros((200,3)) #np.array([0,0,0])
+
+
+        self.transform_pub = tf2_ros.TransformBroadcaster()
+        self.pose_sub  = rospy.Subscriber("/initialpose", PoseWithCovarianceStamped, self.pose_callback, queue_size=1)
+        self.laser_sub = rospy.Subscriber(scan_topic, LaserScan, self.lidar_callback, queue_size=1)
+        self.odom_sub  = rospy.Subscriber(odom_topic, Odometry, self.odom_callback, queue_size=1)
+        self.odom_pub  = rospy.Publisher("/pf/pose/odom", Odometry, queue_size = 1)
+        self.particle_pub = rospy.Publisher("particles", PoseArray, queue_size = 1)
+
+    def calc_avg(self, particles):
+        '''
+        Take average of the calculated particles returned by the evaluate function of motion or sensor model
+        '''
+
+        avg_x = np.average(particles[:,0], weights=self.probabilities, axis = 0)
+        avg_y = np.average(particles[:,1], weights=self.probabilities, axis = 0)
+        avg_cos = np.average(np.cos(particles[:,2]), weights=self.probabilities, axis=0)
+        avg_sin = np.average(np.sin(particles[:,2]), weights=self.probabilities, axis=0)
+        theta_pos = np.arctan2(avg_sin,avg_cos)
+
+        return [avg_x, avg_y, theta_pos]
+    
+    def tf_callback(self, data):
+        self.gt = data
+        if self.has_pos:
+            x = self.pos.pose.pose.position.x
+            y = self.pos.pose.pose.position.y
+            error_x = abs(x-self.gt[0])
+            error_y = abs(y-self.gt[1])
+            error_dis = np.sqrt(error_x**2+error_y**2)
+            self.error_pub_x.publish(error_x)
+            self.error_pub_y.publish(error_y)
+            self.error_pub_dist.publish(error_dis)
+
+
+    # Callback functions
+    def pose_callback(self,data):
+        '''
+        Gets initial pose from rviz data
+        Remember to add posewithcovariance topic on rviz
+        '''
+        with self.particle_lock:
+
+            self.initial_pose = np.array([data.pose.pose.position.x,
+                                          data.pose.pose.position.y,
+                                          2*np.arctan2(data.pose.pose.orientation.z,data.pose.pose.orientation.w)])
+            self.initial_cov = np.array([[data.pose.covariance[0],data.pose.covariance[1],data.pose.covariance[5]],
+                                         [data.pose.covariance[6],data.pose.covariance[7],data.pose.covariance[11]],
+                                         [data.pose.covariance[30],data.pose.covariance[31],data.pose.covariance[35]]])
+            self.particles = np.random.multivariate_normal(self.initial_pose,self.initial_cov, size = self.num_particles)
+
+    
+    def publish_pose(self,pose):
+        avg = pose
+        z,w = np.sin(avg[2]/2),np.cos(avg[2]/2)
+        quat = trans.quaternion_about_axis(avg[2],(0,0,1))
+        
+        odom_msg = Odometry()
+        odom_msg.header.stamp = rospy.Time.now()
+        odom_msg.header.frame_id = 'map'
+        odom_msg.pose.pose.position.x = avg[0]
+        odom_msg.pose.pose.position.y = avg[1]
+        odom_msg.pose.pose.position.z = 0
+        odom_msg.pose.pose.orientation.x = quat[0]
+        odom_msg.pose.pose.orientation.y = quat[1]
+        odom_msg.pose.pose.orientation.z = z
+        odom_msg.pose.pose.orientation.w = w
+        
+        self.odom_pub.publish(odom_msg)
+        if self.measure_error:
+            self.pos = odom_msg
+            self.tf_listener.waitForTransform("map","base_link", rospy.Time(), rospy.Duration(1.0))
+            trans_vect, _ = self.tf_listener.lookupTransform("map","base_link",rospy.Time(0))
+            self.tf_callback(trans_vect)
+            if not self.has_pos:
+                self.has_pos = True
+
+
+        pose_transform = TransformStamped()
+        pose_transform.header.stamp = rospy.Time.now()
+        pose_transform.header.frame_id = '/map'
+        pose_transform.child_frame_id = self.particle_filter_frame # 'base_link_pf' for the simulator, 'base_link' for the car
+        pose_transform.transform.translation.x = avg[0]
+        pose_transform.transform.translation.y = avg[1]
+        pose_transform.transform.translation.z = 0
+        pose_transform.transform.rotation.x = quat[0] #0
+        pose_transform.transform.rotation.y = quat[1] #0
+        pose_transform.transform.rotation.z = z #z
+        pose_transform.transform.rotation.w = w #w
+        self.transform_pub.sendTransform(pose_transform)
+    
+    def odom_callback(self,data):
+        '''
+        Uses motion model
+        '''
+        if self.particles is None: return
+        
+        with self.particle_lock:
+
+            now = rospy.get_time()
+            now_odom = np.array([data.twist.twist.linear.x,
+                                 data.twist.twist.linear.y,
+                                 data.twist.twist.angular.z])
+            
+            if self.last_odom is None: odom = now_odom*(now-self.last_odom_time)
+            else: odom = (now_odom+self.last_odom)*(now-self.last_odom_time)/2
+            
+            self.last_odom = now_odom
+            self.last_odom_time = now
+            
+            self.updated_particles = self.motion_model.evaluate(self.particles, odom)
+            avg = self.calc_avg(self.updated_particles)
+            
+            self.publish_pose(avg)
+            self.particles = self.updated_particles.copy()
+
+            # ADDING STUFF TO MEASURE CONVERGENC RATE
+            if self.measure_convergence_rate:
+                dev1,dev2,dev3 = self.particles.std(axis=0)
+                #print([dev1,dev2,dev3])
+                # NOTE: up thresholds determined by giving false initialization and examinind stds
+                up_threshold_1 = 0.13
+                up_threshold_2 = 0.13
+                up_threshold_3 = 0.13
+                # NOTE: low threshold determined by giving true initilization and examining STDS
+                low_threshold = 0.07
+                if dev1 > up_threshold_1 or dev2 > up_threshold_2 or dev3 > up_threshold_3:
+                    print('began measuring')
+                    self.measuring = True
+                    self.measure_time = rospy.get_time()
+                if dev1 <= low_threshold and dev2 <= low_threshold and dev3 <= low_threshold and self.measuring:
+                    print('end measuring')
+                    curr = rospy.get_time()
+                    self.measuring = False
+                    diff = curr - self.measure_time
+                    print('Convergence Time = ' + str(diff))
+            # END OF CHANGES!
+
+
+
+            
+            if False: #Publish particles for debugging purposes
+                particle_msg = PoseArray()
+                particle_msg.header.stamp = rospy.Time.now()
+                particle_msg.header.frame_id = '/map'
+                
+                for p in self.particles:
+                    pose = Pose()
+                    z,w = np.sin(p[2]/2),np.cos(p[2]/2)
+                    pose.position.x = p[0]
+                    pose.position.y = p[1]
+                    pose.orientation.z = z
+                    pose.orientation.w = w
+                    
+                    particle_msg.poses.append(pose)
+                
+                self.particle_pub.publish(particle_msg)
+
+
+    def lidar_callback(self, data):
+        '''
+        Uses sensor model
+        '''
+        if self.particles is None: return
+        if np.random.rand() > 0.3: return
+        with self.particle_lock:
+
+            probs = self.sensor_model.evaluate(self.particles, np.array(data.ranges),1) # IF ON RACECAR, CHANGE 1 to 11
+            probs /= sum(probs)
+            self.probabilities = probs
+
+            particle_resample = self.particles[np.random.choice(self.particles.shape[0], size=self.particles.shape[0], p=probs), :]
+
+            avg = self.calc_avg(particle_resample)
+            
+            self.publish_pose(avg)
+            
+            self.particles = particle_resample.copy()
+
+if __name__ == "__main__":
+    rospy.init_node("particle_filter")
+    pf = ParticleFilter()
+    rospy.spin()
+
+\end{verbatim}
+}
+
+\subsection{Sensor Model Code}
+{\footnotesize
+\begin{verbatim}
+import numpy as np
+from localization.scan_simulator_2d import PyScanSimulator2D
+import matplotlib.pyplot as plt
+# Try to change to just `from scan_simulator_2d import PyScanSimulator2D` 
+# if any error re: scan_simulator_2d occurs
+
+import rospy
+import tf
+from nav_msgs.msg import OccupancyGrid
+from tf.transformations import quaternion_from_euler
+
+class SensorModel:
+
+    def __init__(self):
+        # Fetch parameters
+        self.map_topic = rospy.get_param("~map_topic")
+        self.num_beams_per_particle = rospy.get_param("~num_beams_per_particle")
+        self.scan_theta_discretization = rospy.get_param("~scan_theta_discretization")
+        self.scan_field_of_view = rospy.get_param("~scan_field_of_view")
+        self.lidar_scale_to_map_scale = rospy.get_param("~lidar_scale_to_map_scale", 1.0)
+
+
+        ####################################
+        # TODO
+        # Adjust these parameters
+        self.alpha_hit = 0.74
+        self.alpha_short = 0.07
+        self.alpha_max = 0.07
+        self.alpha_rand = 0.12
+        self.sigma_hit = 8.0
+
+        # Your sensor table will be a `table_width` x `table_width` np array:
+        self.table_width = 201
+        self.z_max = self.table_width-1
+        ####################################
+
+        # Precompute the sensor model table
+        self.sensor_model_table = None
+        self.precompute_sensor_model()
+
+        # Create a simulated laser scan
+        self.scan_sim = PyScanSimulator2D(
+                self.num_beams_per_particle,
+                self.scan_field_of_view,
+                0, # This is not the simulator, don't add noise
+                0.01, # This is used as an epsilon
+                self.scan_theta_discretization) 
+
+        # Subscribe to the map
+        self.map = None
+        self.map_set = False
+        rospy.Subscriber(
+                self.map_topic,
+                OccupancyGrid,
+                self.map_callback,
+                queue_size=1)
+
+    def precompute_sensor_model(self):
+
+        """
+        Generate and store a table which represents the sensor model.
+        
+        For each discrete computed range value, this provides the probability of 
+        measuring any (discrete) range. This table is indexed by the sensor model
+        at runtime by discretizing the measurements and computed ranges from
+        RangeLibc.
+        This table must be implemented as a numpy 2D array.
+
+        Compute the table based on class parameters alpha_hit, alpha_short,
+        alpha_max, alpha_rand, sigma_hit, and table_width.
+
+        args:
+            N/A
+        
+        returns:
+            No return type. Directly modify `self.sensor_model_table`.
+            columns are d values!
+            200x200
+        """
+
+        zmax = self.table_width-1
+        sigma = self.sigma_hit 
+        alphaHit = self.alpha_hit
+        alphaShort = self.alpha_short
+        alphaMax = self.alpha_max
+        alphaRand = self.alpha_rand
+        table_width = self.table_width
+
+        plot = False # if want to plot the probability distribution. Requires matplotlib.pyplot imported as plt
+        checksum = False # if want to print sum's by column (to make sure ~1.0 for proper normalization)
+
+        def phit(zk,d):
+            if 0<=zk<=zmax:
+                return 1.0/((2.0*np.pi*sigma**2.0)**(0.5))*np.exp(-1.0*(((zk-d)**2.0)/(2.0*sigma**2.0)))
+            return 0.0
+
+        def pshort(zk,d):
+            if zk >= 0 and zk<=d and d != 0:
+                return 2.0/d*(1-(float(zk)/d))
+            return 0.0
+
+        def pmax(zk,d): 
+            if zk == zmax:
+                return 1.0
+            return 0.0
+
+        def prand(zk,d):
+            if zk>=0 and zk <= zmax:
+                return 1.0/zmax
+            return 0.0
+
+        def getP(zk,d): # everything except hit
+            return alphaShort*pshort(zk,d)+alphaMax*pmax(zk,d)+alphaRand*prand(zk,d)
+                
+        #compute PHIT prior to others, columns are d
+        out = []
+        out = np.zeros((table_width,table_width))
+        for i in range(table_width): # z
+            for j in range(table_width): # d
+                out[i][j] = phit(i,j)
+
+        out = out/out.sum(axis=0)
+        out *= alphaHit
+        
+        #compute other part of distribution
+        for i in range(table_width):
+            for j in range(table_width):
+                out[i][j] += getP(i,j)
+
+        # normalize out
+        out = out/out.sum(axis=0)
+        self.sensor_model_table = out
+
+    def downsample(self, arr, spacing, mode = 'direct'):
+        if mode == 'avg':
+            end = spacing * (len(arr) // spacing)
+            return np.mean(arr[:end].reshape(-1, spacing), axis=1)
+        else:
+            return  arr[0::spacing]
+
+
+
+    def evaluate(self, particles, observation, spacing=1):
+        
+        """
+        Evaluate how likely each particle is given
+        the observed scan.
+
+        args:
+            particles: An Nx3 matrix of the form:
+            
+                [x0 y0 theta0]
+                [x1 y0 theta1]
+                [    ...     ]
+
+            observation: A vector of lidar data measured
+                from the actual lidar.
+
+        returns:
+           probabilities: A vector of length N representing
+               the probability of each particle existing
+               given the observation and the map.
+        """
+
+        observation = self.downsample(observation,spacing)
+
+        # UNCOMMENT THE NEXT 3 LINES IF CODE ON ACTUAL CAR!!!
+        scans = self.scan_sim.scan(particles)
+        # for i in range(len(scans)):
+        #     scans[i] = self.downsample(scans[i],spacing)
+
+        z_k = np.clip(np.array(observation)/ (self.map_resolution*self.lidar_scale_to_map_scale), a_min=0, a_max = self.z_max) # clip observations
+        d = np.clip(scans / (self.map_resolution*self.lidar_scale_to_map_scale), a_min = 0, a_max = self.z_max) # clip scans
+        probs = np.prod(self.sensor_model_table[np.rint(z_k).astype(np.int32), np.rint(d).astype(np.int32)], axis=1)**(1/2.2) # get probabilities
+
+        return probs
+
+            
+
+    def map_callback(self, map_msg):
+        # Convert the map to a numpy array
+        self.map_resolution = map_msg.info.resolution
+
+        self.map = np.array(map_msg.data, np.double)/100.
+        self.map = np.clip(self.map, 0, 1)
+
+        # Convert the origin to a tuple
+        origin_p = map_msg.info.origin.position
+        origin_o = map_msg.info.origin.orientation
+        origin_o = tf.transformations.euler_from_quaternion((
+                origin_o.x,
+                origin_o.y,
+                origin_o.z,
+                origin_o.w))
+        origin = (origin_p.x, origin_p.y, origin_o[2])
+
+        # Initialize a map with the laser scan
+        self.scan_sim.set_map(
+                self.map,
+                map_msg.info.height,
+                map_msg.info.width,
+                map_msg.info.resolution,
+                origin,
+                0.5) # Consider anything < 0.5 to be free
+
+        # Make the map set
+        self.map_set = True
+
+        print("Map initialized")
+
+\end{verbatim}
+}
+
+
+
+\subsection{Motion Model Code}
+{\footnotesize
+\begin{verbatim}
+import numpy as np
+import rospy
+
+class MotionModel:
+
+    def __init__(self):
+    
+        self.DETERMINISTIC = rospy.get_param(rospy.search_param('deterministic'))
+
+        #Constants for uncertainty - 1,2 are rotational, 3,4 are translational
+        self.alpha = {1: 0.03,
+                      2: 0.03,
+                      3: 0.02,
+                      4: 0.02} #Arbitrary values, no idea if they make sense
+        self.xy_noise = 0.02
+        self.theta_noise = 0.02
+
+    def eps_b(self,b,n=2):
+        '''
+        Sample a single value from a distribution with mean zero and variance b
+        
+        args:
+            b: A float, the overall variance of the distribution
+            n: An integer for how many uniform samples to average
+                Defaults to 2 (triangular)
+        
+        returns:
+            A randomly-generated float
+        '''
+        c = np.sqrt(abs(3*b/n))
+        return sum(np.random.rand(n))*2*c-c*n
+
+    def evaluate(self, particles, odometry):
+        """
+        Update the particles to reflect probable
+        future states given the odometry data.
+
+        args:
+            particles: An Nx3 matrix of the form:
+            
+                [x0 y0 theta0]
+                [x1 y0 theta1]
+                [    ...     ]
+
+            odometry: A 3-vector [dx dy dtheta]
+
+        returns:
+            particles: An updated matrix of the
+                same size
+        """
+        
+        N = particles.shape[0]
+        for i in range(N):
+            # Rotate the position components of the odometry to the world frame
+            cos,sin = np.cos(particles[i,2]),np.sin(particles[i,2])
+            rotated_displacement = (cos*odometry[0]-sin*odometry[1],
+                                    sin*odometry[0]+cos*odometry[1])
+            
+            if self.DETERMINISTIC:
+                # Add the displacements to the pose
+                particles[i,0] += rotated_displacement[0]
+                particles[i,1] += rotated_displacement[1]
+                particles[i,2] += odometry[2]
+            else:
+                particles[i,0] += rotated_displacement[0]+np.random.normal(0,self.xy_noise)
+                particles[i,1] += rotated_displacement[1]+np.random.normal(0,self.xy_noise)
+                particles[i,2] += odometry[2]+np.random.normal(0,self.theta_noise)
+                '''
+                # Adapted from Probabilistic Robotics, sample_motion_model_odometry
+                
+                # Decompose motion into three components
+                delta_rot_1 = np.arctan2(rotated_displacement[1],
+                                         rotated_displacement[0])-particles[i,2]
+                delta_trans = (odometry[0]**2+odometry[1]**2)**0.5
+                delta_rot_2 = odometry[2]-delta_rot_1
+                
+                # Add noise
+                delta_rot_1 -= self.eps_b(abs(self.alpha[1]*delta_rot_1)+\
+                                          self.alpha[2]*delta_trans)
+                delta_trans -= self.eps_b(self.alpha[3]*delta_trans+\
+                                          abs(self.alpha[4]*(delta_rot_1+delta_rot_2)))
+                delta_rot_2 -= self.eps_b(abs(self.alpha[1]*delta_rot_2)+\
+                                          self.alpha[2]*delta_trans)
+                
+                # Update the pose
+                particles[i,0] += delta_trans*np.cos(particles[i,2]+delta_rot_1)
+                particles[i,1] += delta_trans*np.sin(particles[i,2]+delta_rot_1)
+                particles[i,2] += delta_rot_1+delta_rot_2
+                '''
+        
+        return particles
+
+
+\end{verbatim}
+}
 
 
 \end{document}
